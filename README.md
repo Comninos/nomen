@@ -2,7 +2,7 @@
 
 A no-deps bash file renamer following the **Single-End** software philosophy. Normalizes filenames to a fixed nomenclature. Form only; it will not invent a better name.
 
-NOMEN has no settings and no flags. For configuration, edit the installed script (`~/.local/bin/nomen`, or `/usr/local/bin/nomen` if system-wide), or edit it yourself (see Philosophy below).
+NOMEN has no settings and no flags. For configuration, ask an agent to edit the installed script (`~/.local/bin/nomen`, or `/usr/local/bin/nomen` if system-wide), or edit it yourself (see Philosophy below).
 
 See [examples.md](examples.md) for other nomenclature shapes. Run `./demo.sh` for a demonstration.
 
