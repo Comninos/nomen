@@ -38,6 +38,12 @@ touch \
   "$ROOT/fooBarBaz_utility.py" \
   "$ROOT/camelCaseReport.PDF" \
   "$ROOT/spaces   and___underscores.txt" \
+  "$ROOT/260812taxes.pdf" \
+  "$ROOT/reportv01.txt" \
+  "$ROOT/v1.2.3-release.tar" \
+  "$ROOT/2024-01-15-notes.md" \
+  "$ROOT/Café Menu.pdf" \
+  "$ROOT/release.tar.gz" \
   "$ROOT/inbox/Bank Statement Aug.pdf" \
   "$ROOT/inbox/Invoice #4421.PDF" \
   "$ROOT/inbox/old_scan__copy (1).pdf" \

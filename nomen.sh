@@ -64,6 +64,17 @@ ask_yn() {
 
 # --- grammar helpers -------------------------------------------------------
 
+# Strip diacritics to ASCII before kebab cleanup (iconv when available).
+ascii_fold() {
+    local s="$1" out
+    if command -v iconv >/dev/null 2>&1; then
+        out=$(printf '%s' "$s" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) || out="$s"
+        out=$(printf '%s' "$out" | sed "s/[']//g")
+        s="$out"
+    fi
+    printf '%s' "$s"
+}
+
 is_date_seg() {
     local s="$1" y m d
     case "$s" in
@@ -82,6 +93,59 @@ is_date_seg() {
             ;;
         *) return 1 ;;
     esac
+}
+
+is_yyyymmdd_glued() {
+    local s="$1" m d
+    [[ ${#s} -eq 8 && "$s" =~ ^[0-9]{8}$ ]] || return 1
+    m="${s:4:2}"
+    d="${s:6:2}"
+    ((10#$m >= 1 && 10#$m <= 12 && 10#$d >= 1 && 10#$d <= 31))
+}
+
+compact_from_yyyymmdd() {
+    local s="$1"
+    printf '%s%s%s' "${s:2:2}" "${s:4:2}" "${s:6:2}"
+}
+
+# Split glued date prefix (260812taxes, 20240101notes) or version suffix (reportv01).
+split_glued_date_prefix() {
+    local seg="$1" len rest prefix compact
+    for len in 8 6 4 2; do
+        ((${#seg} <= len)) && continue
+        prefix="${seg:0:len}"
+        rest="${seg:len}"
+        [[ "$rest" =~ ^[a-z] ]] || continue
+        case "$len" in
+            8)
+                if is_yyyymmdd_glued "$prefix"; then
+                    compact=$(compact_from_yyyymmdd "$prefix")
+                    printf '%s-%s' "$compact" "$rest"
+                    return
+                fi
+                ;;
+            *)
+                if is_date_seg "$prefix"; then
+                    printf '%s-%s' "$prefix" "$rest"
+                    return
+                fi
+                ;;
+        esac
+    done
+    printf '%s' "$seg"
+}
+
+split_glued_version_suffix() {
+    local seg="$1" body ver
+    if [[ "$seg" =~ ^(.+)(v[0-9]+([.][0-9]+)*)$ ]]; then
+        body="${BASH_REMATCH[1]}"
+        ver="${BASH_REMATCH[2]}"
+        if [[ -n "$body" ]] && is_version_seg "$ver"; then
+            printf '%s-%s' "$body" "$ver"
+            return
+        fi
+    fi
+    printf '%s' "$seg"
 }
 
 is_version_seg() {
@@ -105,21 +169,33 @@ pad_batch() {
     printf "%0${BATCH_PAD}d" "$n"
 }
 
-# Split basename into stem + extension (last .ext; leading-dot names keep stem).
+# Split basename into stem + extension (compound .tar.* kept; else last .ext).
 split_base() {
-    local base="$1"
-    if [[ "$base" =~ ^(.+)\.([^.]+)$ ]]; then
-        _stem="${BASH_REMATCH[1]}"
-        _ext="${BASH_REMATCH[2]}"
-    else
-        _stem="$base"
-        _ext=""
-    fi
+    local base="$1" lower len
+    lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        *.tar.gz) len=7 ;;
+        *.tar.bz2) len=8 ;;
+        *.tar.xz) len=7 ;;
+        *)
+            if [[ "$base" =~ ^(.+)\.([^.]+)$ ]]; then
+                _stem="${BASH_REMATCH[1]}"
+                _ext="${BASH_REMATCH[2]}"
+            else
+                _stem="$base"
+                _ext=""
+            fi
+            return
+            ;;
+    esac
+    _stem="${base:0:$((${#base} - len))}"
+    _ext="${base:$((${#base} - len + 1))}"
 }
 
 # Camel/digit boundaries → hyphens, then kebab cleanup.
 kebab_raw() {
     local s="$1"
+    s=$(ascii_fold "$s")
     # fooBar → foo-Bar; foo2Bar kept simple via later lower+strip
     s=$(printf '%s' "$s" | sed -E \
         -e 's/([a-z])([A-Z])/\1-\2/g' \
@@ -136,8 +212,8 @@ kebab_raw() {
 
 # Normalize stem to canonical nomenclature (no extension).
 normalize_stem() {
-    local raw="$1" keb date="" suffix="" n seg out _b
-    local -a parts=() clean=() terms=() _bits=()
+    local raw="$1" keb date="" suffix="" n seg out _b iso_y iso_m iso_d split
+    local -a parts=() clean=() terms=() _bits=() unglued=()
 
     keb=$(kebab_raw "$raw")
     [[ -n "$keb" ]] || { printf ''; return; }
@@ -145,17 +221,52 @@ normalize_stem() {
     IFS='-' read -r -a parts <<<"$keb"
 
     for seg in "${parts[@]}"; do
-        [[ -n "$seg" ]] && clean+=("$seg")
+        [[ -n "$seg" ]] || continue
+        seg=$(split_glued_date_prefix "$seg")
+        seg=$(split_glued_version_suffix "$seg")
+        IFS='-' read -r -a _bits <<<"$seg"
+        for _b in "${_bits[@]}"; do
+            [[ -n "$_b" ]] && unglued+=("$_b")
+        done
     done
-    parts=("${clean[@]}")
+    parts=("${unglued[@]}")
     n=${#parts[@]}
     (( n > 0 )) || { printf ''; return; }
 
-    # Leading date only if at least one term follows
-    if (( n >= 2 )) && is_date_seg "${parts[0]}"; then
-        date="${parts[0]}"
-        parts=("${parts[@]:1}")
-        n=${#parts[@]}
+    # ISO date at front: YYYY-MM-DD or YYYY-MM (needs at least one term after)
+    if (( n >= 4 )) \
+        && [[ "${parts[0]}" =~ ^[0-9]{4}$ && "${parts[1]}" =~ ^[0-9]{2}$ && "${parts[2]}" =~ ^[0-9]{2}$ ]]; then
+        iso_y="${parts[0]}"
+        iso_m="${parts[1]}"
+        iso_d="${parts[2]}"
+        if ((10#$iso_m >= 1 && 10#$iso_m <= 12 && 10#$iso_d >= 1 && 10#$iso_d <= 31)); then
+            date="${iso_y: -2}${iso_m}${iso_d}"
+            parts=("${parts[@]:3}")
+            n=${#parts[@]}
+        fi
+    elif (( n >= 3 )) \
+        && [[ "${parts[0]}" =~ ^[0-9]{4}$ && "${parts[1]}" =~ ^[0-9]{2}$ ]]; then
+        iso_y="${parts[0]}"
+        iso_m="${parts[1]}"
+        if ((10#$iso_m >= 1 && 10#$iso_m <= 12)); then
+            date="${iso_y: -2}${iso_m}"
+            parts=("${parts[@]:2}")
+            n=${#parts[@]}
+        fi
+    fi
+
+    # Compact date token (YY / YYMM / YYMMDD / glued YYYYMMDD → compact)
+    if (( n >= 2 )); then
+        seg="${parts[0]}"
+        if [[ ${#seg} -eq 8 && "$seg" =~ ^[0-9]{8}$ ]] && is_yyyymmdd_glued "$seg"; then
+            date=$(compact_from_yyyymmdd "$seg")
+            parts=("${parts[@]:1}")
+            n=${#parts[@]}
+        elif is_date_seg "$seg"; then
+            date="$seg"
+            parts=("${parts[@]:1}")
+            n=${#parts[@]}
+        fi
     fi
 
     # Trailing suffix only if at least one term remains before it
@@ -170,9 +281,11 @@ normalize_stem() {
         fi
     fi
 
-    # Remaining parts are terms; flatten internal dots to hyphens in terms
+    # Remaining parts are terms; flatten internal dots unless version-shaped
     for seg in "${parts[@]}"; do
-        seg="${seg//./-}"
+        if ! is_version_seg "$seg"; then
+            seg="${seg//./-}"
+        fi
         seg=$(printf '%s' "$seg" | sed -E 's/-+/-/g; s/^\-//; s/\-$//')
         if [[ -n "$seg" ]]; then
             IFS='-' read -r -a _bits <<<"$seg"
